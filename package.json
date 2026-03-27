@@ -1,0 +1,21 @@
+{
+  "name": "medref",
+  "version": "1.0.0",
+  "description": "MedRef - Healthcare management platform with blockchain integration",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "backend",
+    "contracts"
+  ],
+  "scripts": {
+    "frontend:start": "cd frontend && npm start",
+    "frontend:android": "cd frontend && npm run android",
+    "frontend:ios": "cd frontend && npm run ios",
+    "frontend:web": "cd frontend && npm run web",
+    "backend:dev": "cd backend && npm run dev",
+    "backend:build": "cd backend && npm run build",
+    "contracts:compile": "cd contracts && npm run compile",
+    "contracts:deploy": "cd contracts && npm run deploy"
+  }
+}

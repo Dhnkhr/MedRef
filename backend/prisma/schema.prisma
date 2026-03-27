@@ -1,0 +1,207 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model Patient {
+  id                    String   @id @default(uuid())
+  patientId             String   @unique // MR-xxxx-xxxx format
+
+  // Authentication fields
+  email                 String   @unique
+  passwordHash          String
+  fullName              String
+  age                   Int?
+  bloodGroup            String?
+
+  // Settings
+  emergencyConsent      Boolean  @default(false)
+  wearableConnected     Boolean  @default(false)
+  wearableSource        String?
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  emergencyContacts     EmergencyContact[]
+  documents             Document[]
+  analysisHistory       AnalysisHistory[]
+  sosEvents             SOSEvent[]
+  qrSessions            QRSession[]
+  consentAuditLogs      ConsentAuditLog[]
+
+  @@index([email])
+}
+
+model EmergencyContact {
+  id            String  @id @default(uuid())
+  name          String
+  phone         String
+  relation      String
+  notifyViaSMS  Boolean @default(true)
+  notifyViaPush Boolean @default(true)
+
+  patientId     String
+  patient       Patient @relation(fields: [patientId], references: [id])
+}
+
+model Hospital {
+  id                String   @id @default(uuid())
+  name              String
+  address           String
+  latitude          Float
+  longitude         Float
+  phone             String?
+  specialists       String   @default("[]") // JSON array of specialist types
+  rating            Float    @default(0)
+  emergencyRating   Float    @default(0)
+  hasTraumaCenter   Boolean  @default(false)
+  hasBloodBank      Boolean  @default(false)
+  estimatedCost     Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  bedAvailability   BedAvailability?
+  analysisHistory   AnalysisHistory[]
+}
+
+model BedAvailability {
+  id                    String   @id @default(uuid())
+  hospitalId            String   @unique
+  hospital              Hospital @relation(fields: [hospitalId], references: [id])
+
+  generalTotal          Int      @default(0)
+  generalAvailable      Int      @default(0)
+  icuTotal              Int      @default(0)
+  icuAvailable          Int      @default(0)
+  nicuTotal             Int      @default(0)
+  nicuAvailable         Int      @default(0)
+  ventilatorTotal       Int      @default(0)
+  ventilatorAvailable   Int      @default(0)
+  otTotal               Int      @default(0)
+  otAvailable           Int      @default(0)
+  emergencyTotal        Int      @default(0)
+  emergencyAvailable    Int      @default(0)
+  avgWaitTime           Int      @default(0) // minutes
+
+  updatedAt             DateTime @updatedAt
+}
+
+model Document {
+  id                    String   @id @default(uuid())
+  patientId             String
+  patient               Patient  @relation(fields: [patientId], references: [id])
+
+  documentType          String   // lab_report, prescription, etc.
+  date                  DateTime
+  tags                  String   @default("[]") // JSON array
+  summary               String?
+  extractedMedications  String?  // JSON array of medication objects
+  extractedDiagnosis    String   @default("[]") // JSON array
+  ipfsHash              String
+  encryptionKey         String
+  scannedByAI           Boolean  @default(false)
+  aiConfidenceScore     Float?
+
+  createdAt             DateTime @default(now())
+}
+
+model AnalysisHistory {
+  id              String   @id @default(uuid())
+  patientId       String
+  patient         Patient  @relation(fields: [patientId], references: [id])
+
+  type            String   // 'symptom_analysis', 'emergency', 'document_scan'
+  inputData       String   // JSON string
+  result          String   // JSON string
+  urgencyLevel    String?
+  hospitalId      String?
+  hospital        Hospital? @relation(fields: [hospitalId], references: [id])
+  isEmergency     Boolean  @default(false)
+
+  createdAt       DateTime @default(now())
+}
+
+model SOSEvent {
+  id                  String   @id @default(uuid())
+  patientId           String
+  patient             Patient  @relation(fields: [patientId], references: [id])
+
+  latitude            Float
+  longitude           Float
+  contactsNotified    Int      @default(0)
+  emergencyFlowTriggered Boolean @default(false)
+  autoConsent         Boolean  @default(false)
+  resolvedAt          DateTime?
+
+  createdAt           DateTime @default(now())
+}
+
+model QRSession {
+  id              String   @id @default(uuid())
+  patientId       String
+  patient         Patient  @relation(fields: [patientId], references: [id])
+
+  type            String   // 'check_in', 'record_share'
+  referenceId     String   @unique
+  encryptedData   String
+  expiresAt       DateTime
+  maxUses         Int      @default(1)
+  currentUses     Int      @default(0)
+  isRevoked       Boolean  @default(false)
+
+  createdAt       DateTime @default(now())
+}
+
+model SyncLog {
+  id          String   @id @default(uuid())
+  actionType  String   // 'hospital_sync', 'bed_update', 'document_upload'
+  status      String   // 'pending', 'completed', 'failed'
+  payload     String?  // JSON string
+  error       String?
+  createdAt   DateTime @default(now())
+  completedAt DateTime?
+}
+
+// ── Consent Audit Log (mirrors blockchain ConsentAuditLog events) ──
+
+model ConsentAuditLog {
+  id                String   @id @default(uuid())
+
+  // Blockchain reference
+  chainEventId      Int?     // Event ID from ConsentAuditLog contract
+  txHash            String?  // Transaction hash
+  blockNumber       Int?
+
+  // Core consent data
+  patientId         String
+  patient           Patient  @relation(fields: [patientId], references: [id])
+  accessorId        String?  // Hospital/doctor ID
+
+  consentType       String   // EMERGENCY_ACCESS, RECORD_SHARE_QR, SOS_AUTO_CONSENT, HOSPITAL_CHECK_IN, REVOKE_ACCESS
+  action            String   // GRANT, REVOKE, USE, EXPIRE
+
+  // Reference linking
+  referenceId       String   // QR session ID, SOS ID, access grant ID
+  referenceType     String   // 'qr_session', 'sos_event', 'access_grant', 'emergency_share'
+
+  // Metadata
+  expiresAt         DateTime?
+  ipHash            String?  // SHA256 hash of requester IP
+  metadataIpfsHash  String?  // IPFS hash of additional encrypted metadata
+
+  // Sync status
+  syncedToChain     Boolean  @default(false)
+  syncError         String?
+
+  createdAt         DateTime @default(now())
+  syncedAt          DateTime?
+
+  @@index([patientId])
+  @@index([referenceId])
+  @@index([consentType, action])
+  @@index([syncedToChain])
+}
