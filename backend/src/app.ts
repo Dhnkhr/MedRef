@@ -4,12 +4,15 @@ import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import dotenv from 'dotenv';
 import { initSocketNamespaces } from './services/socket.registry';
+import { errorHandler } from './middleware/error-handler.middleware';
+import { apiLimiter, authLimiter } from './middleware/rate-limiter.middleware';
 
 import patientRoutes from './routes/patient.routes';
 import analysisRoutes from './routes/analysis.routes';
 import hospitalRoutes from './routes/hospital.routes';
 import emergencyRoutes from './routes/emergency.routes';
 import documentRoutes from './routes/document.routes';
+import bedsRoutes from './routes/beds.routes';
 
 import qrRoutes from './routes/qr.routes';
 import sosRoutes from './routes/sos.routes';
@@ -31,6 +34,11 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+// Rate limiting
+app.use('/api/patient/register', authLimiter);
+app.use('/api/patient/login', authLimiter);
+app.use('/api', apiLimiter);
+
 // Health check
 app.get('/api/health', (_req, res) => {
     res.json({
@@ -47,11 +55,15 @@ app.use('/api/analysis', analysisRoutes);
 app.use('/api/hospitals', hospitalRoutes);
 app.use('/api/emergency', emergencyRoutes);
 app.use('/api/documents', documentRoutes);
+app.use('/api/beds', bedsRoutes);
 
 app.use('/api/qr', qrRoutes);
 app.use('/api/sos', sosRoutes);
 app.use('/api/wearable', wearableRoutes);
 app.use('/api/sync', syncRoutes);
+
+// Global error handler (must be after all routes)
+app.use(errorHandler);
 
 // WebSocket namespaces — initialized via registry to avoid circular imports
 const { emergencyNamespace } = initSocketNamespaces(io);
