@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import {
     View, Text, StyleSheet, ScrollView, SafeAreaView,
-    TouchableOpacity, Platform, StatusBar, ActivityIndicator, Alert, Modal, TextInput,
+    TouchableOpacity, Platform, StatusBar, ActivityIndicator, Alert, Modal, TextInput, Linking,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import * as DocumentPicker from 'expo-document-picker';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { FontSizes, FontWeights, Spacing, Radius } from '@/constants/theme';
 import { usePatient } from '@/hooks/use-patient';
@@ -25,7 +26,28 @@ const DOC_TYPE_META: Record<string, { iconName: IoniconsName; iconColor: string;
 interface DocItem {
     id: string; type: string; name: string; date: string;
     confidence: number; tags: string[]; onChain: boolean;
-    ipfsHash?: string; txHash?: string;
+    ipfsHash?: string; txHash?: string; recordId?: number;
+}
+
+interface ViewedDocument {
+    name: string;
+    type: string;
+    date: string;
+    content: string;
+    ipfsHash?: string;
+    gatewayUrl?: string;
+    note?: string;
+}
+
+interface DebugInfo {
+    dbEntryFound: boolean;
+    hasEncryptionKey: boolean;
+    keyLength: number;
+    keyPreview: string | null;
+    ipfsFetchOk: boolean;
+    ipfsFetchError: string | null;
+    canDecrypt: boolean;
+    decryptError: string | null;
 }
 
 export default function DocumentsScreen() {
@@ -46,6 +68,29 @@ export default function DocumentsScreen() {
     const [uploadType, setUploadType] = useState('lab_report');
     const [scanResult, setScanResult] = useState<any>(null);
     const [showScanResult, setShowScanResult] = useState(false);
+    const [selectedFile, setSelectedFile] = useState<any>(null);
+    const [showViewModal, setShowViewModal] = useState(false);
+    const [viewLoading, setViewLoading] = useState(false);
+    const [viewedDoc, setViewedDoc] = useState<ViewedDocument | null>(null);
+    const [selectedDoc, setSelectedDoc] = useState<DocItem | null>(null);
+    const [debugLoading, setDebugLoading] = useState(false);
+    const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
+
+    const openOnGateway = async (ipfsHash?: string, gatewayUrl?: string) => {
+        const url = gatewayUrl || (ipfsHash ? `https://gateway.pinata.cloud/ipfs/${ipfsHash}` : '');
+        if (!url) {
+            Alert.alert('Unavailable', 'No gateway URL found for this document.');
+            return;
+        }
+
+        const canOpen = await Linking.canOpenURL(url);
+        if (!canOpen) {
+            Alert.alert('Open Failed', 'Could not open the Pinata URL on this device.');
+            return;
+        }
+
+        await Linking.openURL(url);
+    };
 
     useEffect(() => {
         if (!patientId) {
@@ -68,6 +113,7 @@ export default function DocumentsScreen() {
                         onChain: Boolean(d.onChain),
                         ipfsHash: d.ipfsHash,
                         txHash: d.txHash,
+                        recordId: d.recordId,
                     }));
                     setDocs(mapped);
                 } else {
@@ -79,7 +125,26 @@ export default function DocumentsScreen() {
         })();
     }, [patientId]);
 
+    const pickFile = async () => {
+        try {
+            const result = await DocumentPicker.getDocumentAsync({
+                type: '*/*',
+            });
+            if (!result.canceled && result.assets && result.assets.length > 0) {
+                const asset = result.assets[0];
+                setSelectedFile(asset);
+                setUploadName(asset.name || 'Document');
+            }
+        } catch (error) {
+            Alert.alert('Error', 'Failed to pick file');
+        }
+    };
+
     const handleUpload = async () => {
+        if (!selectedFile) {
+            Alert.alert('No File', 'Please select a file first');
+            return;
+        }
         if (!uploadName.trim()) {
             Alert.alert('Missing Info', 'Please enter a document name.');
             return;
@@ -92,6 +157,19 @@ export default function DocumentsScreen() {
                 return;
             }
 
+            // Read file content
+            let fileContent = '';
+            try {
+                if (selectedFile.uri) {
+                    const response = await fetch(selectedFile.uri);
+                    const blob = await response.blob();
+                    fileContent = await blob.text();
+                }
+            } catch (readError) {
+                // If text reading fails, use base64 encoding
+                fileContent = `File: ${selectedFile.name} (${selectedFile.size} bytes)`;
+            }
+
             const res = await fetch(`${API_BASE}/documents/upload`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -99,7 +177,7 @@ export default function DocumentsScreen() {
                     patientId,
                     documentType: uploadType,
                     fileName: uploadName,
-                    documentData: JSON.stringify({ name: uploadName, type: uploadType, content: 'encrypted-document-data' }),
+                    documentData: fileContent || JSON.stringify({ name: uploadName, type: uploadType, file: selectedFile.name }),
                 }),
             });
             const json = await res.json();
@@ -115,17 +193,106 @@ export default function DocumentsScreen() {
                     onChain: d.storedOnChain,
                     ipfsHash: d.ipfsHash,
                     txHash: d.txHash,
+                    recordId: d.recordId,
                 }, ...prev]);
                 Alert.alert(
                     '✅ Uploaded Successfully',
                     `Document: ${uploadName}\nIPFS: ${d.ipfsHash?.substring(0, 20)}...\nBlockchain: ${d.storedOnChain ? 'Stored on Polygon' : 'Pending'}\nTx: ${d.txHash?.substring(0, 20)}...`
                 );
                 setUploadName('');
+                setSelectedFile(null);
+            } else {
+                Alert.alert('Upload Error', json.error || 'Upload failed');
             }
-        } catch {
+        } catch (error) {
             Alert.alert('Upload Error', 'Could not reach server.');
         } finally {
             setUploading(false);
+        }
+    };
+
+    const handleViewDocument = async (doc: DocItem) => {
+        if (!patientId) {
+            Alert.alert('Patient Required', 'Please register or log in first.');
+            return;
+        }
+
+        setViewLoading(true);
+        setShowViewModal(true);
+        setSelectedDoc(doc);
+        setDebugInfo(null);
+
+        try {
+            const routeId = doc.recordId ? String(doc.recordId) : doc.id;
+            const res = await fetch(`${API_BASE}/documents/${patientId}/${routeId}`);
+            const json = await res.json();
+
+            if (!json.success) {
+                throw new Error(json.error || 'Could not fetch document');
+            }
+
+            const data = json.data || {};
+            const record = data.record || {};
+
+            let content = '';
+            if (typeof data.decryptedData === 'string' && data.decryptedData.trim().length > 0) {
+                content = data.decryptedData;
+            } else if (typeof data.ipfsData?.encrypted === 'string') {
+                content = data.ipfsData.encrypted;
+            } else {
+                content = JSON.stringify(data.ipfsData || {}, null, 2);
+            }
+
+            setViewedDoc({
+                name: record.fileName || doc.name,
+                type: record.documentType || doc.type,
+                date: doc.date,
+                content,
+                ipfsHash: record.ipfsHash || doc.ipfsHash,
+                gatewayUrl: record.gatewayUrl,
+                note: data.decryptError || data.note || data.ipfsFetchError,
+            });
+        } catch (error: any) {
+            setViewedDoc(null);
+            Alert.alert(
+                'View Error',
+                error?.message || 'Unable to load this document.',
+                [
+                    { text: 'Cancel', style: 'cancel' },
+                    {
+                        text: 'Open on Pinata',
+                        onPress: () => {
+                            openOnGateway(doc.ipfsHash);
+                        },
+                    },
+                ]
+            );
+            setShowViewModal(false);
+        } finally {
+            setViewLoading(false);
+        }
+    };
+
+    const runDebugCheck = async () => {
+        if (!patientId || !selectedDoc) {
+            return;
+        }
+
+        setDebugLoading(true);
+        try {
+            const routeId = selectedDoc.recordId ? String(selectedDoc.recordId) : selectedDoc.id;
+            const res = await fetch(`${API_BASE}/documents/${patientId}/${routeId}/debug`);
+            const json = await res.json();
+
+            if (!json.success) {
+                throw new Error(json.error || 'Debug check failed');
+            }
+
+            setDebugInfo(json.data as DebugInfo);
+        } catch (error: any) {
+            Alert.alert('Debug Error', error?.message || 'Could not run debug check');
+        } finally {
+            setDebugLoading(false);
         }
     };
 
@@ -214,6 +381,7 @@ export default function DocumentsScreen() {
                             key={doc.id}
                             style={[styles.docCard, { backgroundColor: cardBg, borderColor: cardBorder }]}
                             activeOpacity={0.8}
+                            onPress={() => handleViewDocument(doc)}
                         >
                             <View style={styles.docLeft}>
                                 <View style={[styles.docIcon, { backgroundColor: meta.iconBg }]}>
@@ -260,8 +428,20 @@ export default function DocumentsScreen() {
                         <Text style={[styles.modalTitle, { color: textColor }]}>Upload Document</Text>
                         <Text style={[{ color: subColor, fontSize: 12, marginBottom: 16 }]}>Encrypt → IPFS → Polygon</Text>
 
+                        <TouchableOpacity style={[styles.filePickerBtn, { borderColor: selectedFile ? '#2563EB' : cardBorder, backgroundColor: selectedFile ? 'rgba(37,99,235,0.05)' : (isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)') }]} onPress={pickFile}>
+                            <Ionicons name={selectedFile ? 'checkmark-circle' : 'document'} size={20} color={selectedFile ? '#2563EB' : subColor} />
+                            <View style={{ flex: 1, marginLeft: 12 }}>
+                                <Text style={[{ color: selectedFile ? '#2563EB' : subColor, fontWeight: '600', fontSize: 13 }]}>
+                                    {selectedFile ? 'File selected' : 'Select a file to upload'}
+                                </Text>
+                                <Text style={[{ color: subColor, fontSize: 11, marginTop: 2 }]}>
+                                    {selectedFile ? selectedFile.name : 'Tap to browse'}
+                                </Text>
+                            </View>
+                        </TouchableOpacity>
+
                         <TextInput
-                            style={[styles.modalInput, { color: textColor, borderColor: cardBorder, backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)' }]}
+                            style={[styles.modalInput, { color: textColor, borderColor: cardBorder, backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)', marginTop: 12 }]}
                             placeholder="Document name"
                             placeholderTextColor={subColor}
                             value={uploadName}
@@ -291,10 +471,10 @@ export default function DocumentsScreen() {
                         </View>
 
                         <View style={styles.modalBtnRow}>
-                            <TouchableOpacity style={[styles.modalBtn, { borderColor: cardBorder, borderWidth: 1 }]} onPress={() => setShowUploadModal(false)}>
+                            <TouchableOpacity style={[styles.modalBtn, { borderColor: cardBorder, borderWidth: 1 }]} onPress={() => { setShowUploadModal(false); setSelectedFile(null); }}>
                                 <Text style={{ color: subColor, fontWeight: '600' }}>Cancel</Text>
                             </TouchableOpacity>
-                            <TouchableOpacity style={[styles.modalBtn, { backgroundColor: '#2563EB' }]} onPress={handleUpload}>
+                            <TouchableOpacity style={[styles.modalBtn, { backgroundColor: selectedFile ? '#2563EB' : '#888', opacity: selectedFile ? 1 : 0.6 }]} onPress={handleUpload} disabled={!selectedFile || uploading}>
                                 <Text style={{ color: '#FFF', fontWeight: '700' }}>Upload & Encrypt</Text>
                             </TouchableOpacity>
                         </View>
@@ -351,6 +531,91 @@ export default function DocumentsScreen() {
                     </View>
                 </View>
             </Modal>
+
+            {/* View Document Modal */}
+            <Modal visible={showViewModal} transparent animationType="fade" onRequestClose={() => setShowViewModal(false)}>
+                <View style={styles.modalOverlay}>
+                    <View style={[styles.modalCard, { backgroundColor: isDark ? '#1A2035' : '#FFFFFF', maxHeight: '85%' }]}>
+                        {viewLoading ? (
+                            <View style={{ paddingVertical: 28, alignItems: 'center', justifyContent: 'center' }}>
+                                <ActivityIndicator size="small" color="#2563EB" />
+                                <Text style={{ marginTop: 12, color: subColor, fontSize: 12 }}>Loading document...</Text>
+                            </View>
+                        ) : (
+                            <>
+                                <Text style={[styles.modalTitle, { color: textColor }]}>View Document</Text>
+                                {viewedDoc && (
+                                    <ScrollView showsVerticalScrollIndicator={false}>
+                                        <Text style={[styles.scanSection, { color: subColor }]}>NAME</Text>
+                                        <Text style={[styles.scanVal, { color: textColor }]}>{viewedDoc.name}</Text>
+
+                                        <Text style={[styles.scanSection, { color: subColor }]}>TYPE</Text>
+                                        <Text style={[styles.scanVal, { color: textColor }]}>{viewedDoc.type.replace('_', ' ')}</Text>
+
+                                        <Text style={[styles.scanSection, { color: subColor }]}>DATE</Text>
+                                        <Text style={[styles.scanVal, { color: textColor }]}>{viewedDoc.date}</Text>
+
+                                        {viewedDoc.ipfsHash && (
+                                            <>
+                                                <Text style={[styles.scanSection, { color: subColor }]}>IPFS HASH</Text>
+                                                <Text style={[styles.scanVal, { color: textColor, fontSize: 12 }]}>{viewedDoc.ipfsHash}</Text>
+                                            </>
+                                        )}
+
+                                        {viewedDoc.note && (
+                                            <View style={[styles.scanBadge, { backgroundColor: 'rgba(245,158,11,0.15)', marginTop: 14 }]}>
+                                                <Text style={{ color: '#F59E0B', fontWeight: '700', fontSize: 12 }}>{viewedDoc.note}</Text>
+                                            </View>
+                                        )}
+
+                                        <Text style={[styles.scanSection, { color: subColor, marginTop: 14 }]}>CONTENT</Text>
+                                        <View style={[styles.labRow, { borderColor: cardBorder, alignItems: 'flex-start', paddingVertical: 10 }]}>
+                                            <Text style={[{ color: textColor, fontSize: 12, lineHeight: 18 }]}>{viewedDoc.content || 'No preview available.'}</Text>
+                                        </View>
+
+                                        <TouchableOpacity
+                                            style={[styles.modalBtnFull, { backgroundColor: '#7C3AED', marginTop: 14 }]}
+                                            onPress={() => openOnGateway(viewedDoc.ipfsHash, viewedDoc.gatewayUrl)}
+                                        >
+                                            <Text style={{ color: '#FFF', fontWeight: '700' }}>Open on Pinata</Text>
+                                        </TouchableOpacity>
+
+                                        <TouchableOpacity
+                                            style={[styles.modalBtnFull, { backgroundColor: '#0EA5E9', marginTop: 10 }]}
+                                            onPress={runDebugCheck}
+                                            disabled={debugLoading}
+                                        >
+                                            {debugLoading ? (
+                                                <ActivityIndicator size="small" color="#FFF" />
+                                            ) : (
+                                                <Text style={{ color: '#FFF', fontWeight: '700' }}>Run Debug Check</Text>
+                                            )}
+                                        </TouchableOpacity>
+
+                                        {debugInfo && (
+                                            <View style={[styles.debugBox, { borderColor: cardBorder, backgroundColor: isDark ? 'rgba(14,165,233,0.08)' : 'rgba(14,165,233,0.06)' }]}>
+                                                <Text style={[styles.debugTitle, { color: textColor }]}>Debug Status</Text>
+                                                <Text style={[styles.debugLine, { color: subColor }]}>DB Entry: {debugInfo.dbEntryFound ? 'Yes' : 'No'}</Text>
+                                                <Text style={[styles.debugLine, { color: subColor }]}>Encryption Key: {debugInfo.hasEncryptionKey ? 'Present' : 'Missing'}</Text>
+                                                <Text style={[styles.debugLine, { color: subColor }]}>Key Length: {debugInfo.keyLength}</Text>
+                                                <Text style={[styles.debugLine, { color: subColor }]}>IPFS Fetch: {debugInfo.ipfsFetchOk ? 'OK' : 'Failed'}</Text>
+                                                <Text style={[styles.debugLine, { color: debugInfo.canDecrypt ? '#10B981' : '#EF4444' }]}>Decrypt: {debugInfo.canDecrypt ? 'Success' : 'Failed'}</Text>
+                                                {!debugInfo.canDecrypt && debugInfo.decryptError && (
+                                                    <Text style={[styles.debugLine, { color: '#F59E0B' }]}>Reason: {debugInfo.decryptError}</Text>
+                                                )}
+                                            </View>
+                                        )}
+                                    </ScrollView>
+                                )}
+                            </>
+                        )}
+
+                        <TouchableOpacity style={[styles.modalBtnFull, { backgroundColor: '#2563EB', marginTop: 16 }]} onPress={() => setShowViewModal(false)}>
+                            <Text style={{ color: '#FFF', fontWeight: '700' }}>Close</Text>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            </Modal>
         </SafeAreaView>
     );
 }
@@ -388,6 +653,7 @@ const styles = StyleSheet.create({
     modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', padding: Spacing.base },
     modalCard: { borderRadius: Radius.xl, padding: Spacing.xl, width: '100%', maxWidth: 420 },
     modalTitle: { fontSize: FontSizes.lg, fontWeight: '700', marginBottom: 4 },
+    filePickerBtn: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderRadius: Radius.md, paddingHorizontal: 12, paddingVertical: 12, marginBottom: Spacing.md },
     modalInput: { borderWidth: 1, borderRadius: Radius.md, paddingHorizontal: 14, paddingVertical: 12, fontSize: FontSizes.base, marginBottom: Spacing.md },
     typeLabel: { fontSize: 11, fontWeight: '700', letterSpacing: 1, marginBottom: Spacing.sm },
     typeGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: Spacing.lg },
@@ -400,4 +666,7 @@ const styles = StyleSheet.create({
     scanSection: { fontSize: 11, fontWeight: '700', letterSpacing: 1, marginTop: Spacing.md, marginBottom: 4 },
     scanVal: { fontSize: 14, lineHeight: 20 },
     labRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1 },
+    debugBox: { marginTop: 12, borderWidth: 1, borderRadius: Radius.md, padding: 10 },
+    debugTitle: { fontSize: 13, fontWeight: '700', marginBottom: 6 },
+    debugLine: { fontSize: 12, lineHeight: 18 },
 });

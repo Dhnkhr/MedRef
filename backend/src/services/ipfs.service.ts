@@ -6,6 +6,10 @@ const PINATA_API_URL = 'https://api.pinata.cloud';
 const PINATA_JWT = process.env.PINATA_JWT || '';
 const PINATA_GATEWAY = process.env.PINATA_GATEWAY || 'https://gateway.pinata.cloud/ipfs';
 
+export function getIPFSGatewayUrl(ipfsHash: string): string {
+    return `${PINATA_GATEWAY.replace(/\/+$/, '')}/${ipfsHash}`;
+}
+
 export interface IPFSUploadResult {
     success: boolean;
     ipfsHash: string;
@@ -30,7 +34,7 @@ export async function uploadToIPFS(
             ipfsHash: mockHash,
             pinSize: Buffer.byteLength(encryptedData),
             timestamp: new Date().toISOString(),
-            gatewayUrl: `${PINATA_GATEWAY}/${mockHash}`,
+            gatewayUrl: getIPFSGatewayUrl(mockHash),
         };
     }
 
@@ -75,7 +79,7 @@ export async function uploadToIPFS(
             ipfsHash: result.IpfsHash,
             pinSize: result.PinSize,
             timestamp: result.Timestamp || new Date().toISOString(),
-            gatewayUrl: `${PINATA_GATEWAY}/${result.IpfsHash}`,
+            gatewayUrl: getIPFSGatewayUrl(result.IpfsHash),
         };
     } catch (error: any) {
         console.error('[IPFS] Upload failed:', error.message);
@@ -93,11 +97,28 @@ export async function getFromIPFS(ipfsHash: string): Promise<any> {
     }
 
     try {
-        const response = await fetch(`${PINATA_GATEWAY}/${ipfsHash}`);
+        const gatewayUrl = getIPFSGatewayUrl(ipfsHash);
+        const response = await fetch(gatewayUrl);
         if (!response.ok) {
             throw new Error(`IPFS fetch failed: ${response.status}`);
         }
-        return await response.json();
+
+        const contentType = response.headers.get('content-type') || '';
+        const bodyText = await response.text();
+
+        if (contentType.includes('application/json')) {
+            return JSON.parse(bodyText);
+        }
+
+        try {
+            return JSON.parse(bodyText);
+        } catch {
+            return {
+                raw: bodyText,
+                contentType,
+                gatewayUrl,
+            };
+        }
     } catch (error: any) {
         console.error('[IPFS] Fetch failed:', error.message);
         throw error;
