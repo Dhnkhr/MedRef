@@ -1,9 +1,11 @@
 import { Router, Request, Response } from 'express';
-import { encrypt, decrypt, generateKey } from '../services/encryption.service';
+import { encrypt, decrypt, generateKey, deriveKey } from '../services/encryption.service';
 import { uploadToIPFS, getFromIPFS, listPatientPins, getIPFSGatewayUrl } from '../services/ipfs.service';
 import { storeRecordOnChain, getPatientRecords } from '../services/blockchain.service';
 import { scanMedicalDocument } from '../services/groq.service';
 import crypto from 'crypto';
+
+const DOCUMENT_PIN = process.env.DOCUMENT_PIN || '';
 
 const router = Router();
 
@@ -15,6 +17,21 @@ function normalizeRecordId(raw: string): number | null {
 
 function getPayloadCandidate(ipfsData: any): any {
     return typeof ipfsData?.encrypted === 'string' ? ipfsData.encrypted : ipfsData;
+}
+
+function tryDecryptWithPin(payload: any): string | null {
+    if (!DOCUMENT_PIN || DOCUMENT_PIN.length === 0) {
+        return null;
+    }
+
+    try {
+        const salt = Buffer.from(payload.salt, 'base64');
+        const derivedKey = deriveKey(DOCUMENT_PIN, salt);
+        const decrypted = decrypt(payload, derivedKey);
+        return decrypted || null;
+    } catch {
+        return null;
+    }
 }
 
 // POST /api/documents/upload — Encrypt → IPFS → Blockchain
@@ -29,8 +46,17 @@ router.post('/upload', async (req: Request, res: Response) => {
         const docType = documentType;
         const data = documentData;
 
-        // 1. Generate encryption key and encrypt the document
-        const encKey = generateKey();
+        // 1. Generate encryption key — use PIN if available, else random fallback
+        let encKey: Buffer;
+        if (DOCUMENT_PIN && DOCUMENT_PIN.length > 0) {
+            // Encrypt with PIN-derived key so it can always be decrypted with PIN
+            const salt = crypto.randomBytes(16);
+            encKey = deriveKey(DOCUMENT_PIN, salt);
+        } else {
+            // Fallback: use random key (no PIN configured)
+            encKey = generateKey();
+        }
+
         const encPayload = encrypt(data, encKey);
         const encKeyHash = crypto.createHash('sha256').update(encKey).digest('hex');
 
@@ -62,7 +88,8 @@ router.post('/upload', async (req: Request, res: Response) => {
                 summary: fileName || null,
                 tags: JSON.stringify([docType]),
                 ipfsHash: ipfsResult.ipfsHash,
-                encryptionKey: encKey.toString('base64'), // Store key for later decryption
+                encryptionKey: encKey.toString('base64'), // Store key for reference (PIN is primary)
+                scannedByAI: false,
             },
         });
         await prisma.$disconnect();
@@ -182,6 +209,22 @@ router.get('/:patientId/:recordId', async (req: Request, res: Response) => {
         await prisma.$disconnect();
 
         if (!docRecord) {
+            let decryptedData: string | null = null;
+            let decryptError: string | null = null;
+
+            if (!ipfsFetchError && ipfsData) {
+                try {
+                    const payloadCandidate = getPayloadCandidate(ipfsData);
+                    const payload = typeof payloadCandidate === 'string' ? JSON.parse(payloadCandidate) : payloadCandidate;
+                    decryptedData = tryDecryptWithPin(payload);
+                    if (!decryptedData) {
+                        decryptError = 'PIN decryption failed or PIN not configured';
+                    }
+                } catch (error: any) {
+                    decryptError = error?.message || 'Failed to parse IPFS data';
+                }
+            }
+
             return res.json({
                 success: true,
                 data: {
@@ -195,13 +238,16 @@ router.get('/:patientId/:recordId', async (req: Request, res: Response) => {
                     encrypted: true,
                     ipfsData,
                     ipfsFetchError,
-                    note: 'Encryption key not available - document cannot be decrypted',
+                    decryptedData,
+                    decryptError,
+                    note: decryptedData ? 'Decrypted with master PIN' : 'No stored key found - tried PIN decryption',
                 },
             });
         }
 
         let decryptedData: string | null = null;
         let decryptError: string | null = null;
+        let usedPin = false;
 
         try {
             if (!ipfsData) {
@@ -209,8 +255,30 @@ router.get('/:patientId/:recordId', async (req: Request, res: Response) => {
             }
             const payloadCandidate = getPayloadCandidate(ipfsData);
             const payload = typeof payloadCandidate === 'string' ? JSON.parse(payloadCandidate) : payloadCandidate;
-            const key = Buffer.from(docRecord.encryptionKey, 'base64');
-            decryptedData = decrypt(payload, key);
+
+            // Try with stored key first
+            if (docRecord.encryptionKey) {
+                try {
+                    const key = Buffer.from(docRecord.encryptionKey, 'base64');
+                    decryptedData = decrypt(payload, key);
+                } catch (storedKeyError: any) {
+                    // Stored key failed; try PIN as fallback
+                    decryptedData = tryDecryptWithPin(payload);
+                    if (decryptedData) {
+                        usedPin = true;
+                    } else {
+                        decryptError = storedKeyError?.message || 'Stored key decryption failed, PIN decryption also failed';
+                    }
+                }
+            } else {
+                // No stored key; try PIN
+                decryptedData = tryDecryptWithPin(payload);
+                if (decryptedData) {
+                    usedPin = true;
+                } else {
+                    decryptError = 'No stored key and PIN decryption failed';
+                }
+            }
         } catch (error: any) {
             decryptError = error?.message || 'Unable to decrypt document content';
         }
@@ -232,6 +300,7 @@ router.get('/:patientId/:recordId', async (req: Request, res: Response) => {
                 ipfsFetchError,
                 decryptedData,
                 decryptError,
+                usedPin,
                 decryptOnClient: true, // Indicate that decryption should happen on client
             },
         });
