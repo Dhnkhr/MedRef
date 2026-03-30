@@ -75,6 +75,7 @@ export default function DocumentsScreen() {
     const [selectedDoc, setSelectedDoc] = useState<DocItem | null>(null);
     const [debugLoading, setDebugLoading] = useState(false);
     const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
+    const [deleteLoading, setDeleteLoading] = useState(false);
 
     const openOnGateway = async (ipfsHash?: string, gatewayUrl?: string) => {
         const url = gatewayUrl || (ipfsHash ? `https://gateway.pinata.cloud/ipfs/${ipfsHash}` : '');
@@ -235,8 +236,13 @@ export default function DocumentsScreen() {
             const record = data.record || {};
 
             let content = '';
+            let note = '';
+            
             if (typeof data.decryptedData === 'string' && data.decryptedData.trim().length > 0) {
                 content = data.decryptedData;
+                if (data.usedPin) {
+                    note = '✅ Decrypted using master PIN';
+                }
             } else if (typeof data.ipfsData?.encrypted === 'string') {
                 content = data.ipfsData.encrypted;
             } else {
@@ -250,7 +256,7 @@ export default function DocumentsScreen() {
                 content,
                 ipfsHash: record.ipfsHash || doc.ipfsHash,
                 gatewayUrl: record.gatewayUrl,
-                note: data.decryptError || data.note || data.ipfsFetchError,
+                note: note || data.decryptError || data.note || data.ipfsFetchError,
             });
         } catch (error: any) {
             setViewedDoc(null);
@@ -294,6 +300,68 @@ export default function DocumentsScreen() {
         } finally {
             setDebugLoading(false);
         }
+    };
+
+    const handleDeleteDocument = () => {
+        if (!patientId || !selectedDoc) {
+            return;
+        }
+
+        Alert.alert(
+            'Delete Document',
+            `Are you sure you want to permanently delete "${selectedDoc.name}" from the blockchain?`,
+            [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                    text: 'Delete',
+                    style: 'destructive',
+                    onPress: async () => {
+                        setDeleteLoading(true);
+                        try {
+                            const routeId = selectedDoc.recordId ? String(selectedDoc.recordId) : selectedDoc.id;
+                            const res = await fetch(`${API_BASE}/documents/${patientId}/${routeId}`, {
+                                method: 'DELETE',
+                            });
+                            const json = await res.json();
+
+                            if (!json.success) {
+                                throw new Error(json.error || 'Delete failed');
+                            }
+
+                            Alert.alert('Success', 'Document deleted from blockchain');
+                            setShowViewModal(false);
+
+                            // Refresh document list
+                            try {
+                                const listRes = await fetch(`${API_BASE}/documents/${patientId}`);
+                                const listJson = await listRes.json();
+                                if (listJson.success && Array.isArray(listJson.data?.documents)) {
+                                    const mapped: DocItem[] = listJson.data.documents.map((d: any) => ({
+                                        id: d.id,
+                                        type: d.docType || 'general',
+                                        name: (d.docType || 'document').replace('_', ' '),
+                                        date: d.date || 'Unknown date',
+                                        confidence: 1,
+                                        tags: [d.docType || 'document'],
+                                        onChain: Boolean(d.onChain),
+                                        ipfsHash: d.ipfsHash,
+                                        txHash: d.txHash,
+                                        recordId: d.recordId,
+                                    }));
+                                    setDocs(mapped);
+                                }
+                            } catch {
+                                // If refresh fails, close modal anyway
+                            }
+                        } catch (error: any) {
+                            Alert.alert('Delete Error', error?.message || 'Could not delete document');
+                        } finally {
+                            setDeleteLoading(false);
+                        }
+                    },
+                },
+            ]
+        );
     };
 
     const handleScan = async () => {
@@ -605,6 +673,18 @@ export default function DocumentsScreen() {
                                                 )}
                                             </View>
                                         )}
+
+                                        <TouchableOpacity
+                                            style={[styles.modalBtnFull, { backgroundColor: '#EF4444', marginTop: 10 }]}
+                                            onPress={handleDeleteDocument}
+                                            disabled={deleteLoading}
+                                        >
+                                            {deleteLoading ? (
+                                                <ActivityIndicator size="small" color="#FFF" />
+                                            ) : (
+                                                <Text style={{ color: '#FFF', fontWeight: '700' }}>🗑️ Delete from Blockchain</Text>
+                                            )}
+                                        </TouchableOpacity>
                                     </ScrollView>
                                 )}
                             </>
