@@ -4,7 +4,7 @@
  * blockchain (for immutable audit trail).
  */
 
-import { PrismaClient, ConsentEventType, ConsentAction } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import crypto from 'crypto';
 import {
     ConsentType as ChainConsentType,
@@ -20,8 +20,8 @@ const prisma = new PrismaClient();
 export interface ConsentEventInput {
     patientId: string;
     accessorId?: string;
-    consentType: ConsentEventType;
-    action: ConsentAction;
+    consentType: 'EMERGENCY_ACCESS' | 'RECORD_SHARE_QR' | 'SOS_AUTO_CONSENT' | 'HOSPITAL_CHECK_IN' | 'REVOKE_ACCESS';
+    action: 'GRANT' | 'REVOKE' | 'USE' | 'EXPIRE';
     referenceId: string;
     referenceType: 'qr_session' | 'sos_event' | 'access_grant' | 'emergency_share';
     expiresAt?: Date;
@@ -49,8 +49,8 @@ function hashIP(ip: string | undefined): string | null {
 /**
  * Map Prisma ConsentEventType to blockchain ConsentType enum
  */
-function mapConsentTypeToChain(type: ConsentEventType): ChainConsentType {
-    const mapping: Record<ConsentEventType, ChainConsentType> = {
+function mapConsentTypeToChain(type: 'EMERGENCY_ACCESS' | 'RECORD_SHARE_QR' | 'SOS_AUTO_CONSENT' | 'HOSPITAL_CHECK_IN' | 'REVOKE_ACCESS'): ChainConsentType {
+    const mapping: Record<'EMERGENCY_ACCESS' | 'RECORD_SHARE_QR' | 'SOS_AUTO_CONSENT' | 'HOSPITAL_CHECK_IN' | 'REVOKE_ACCESS', ChainConsentType> = {
         EMERGENCY_ACCESS: ChainConsentType.EMERGENCY_ACCESS,
         RECORD_SHARE_QR: ChainConsentType.RECORD_SHARE_QR,
         SOS_AUTO_CONSENT: ChainConsentType.SOS_AUTO_CONSENT,
@@ -105,7 +105,7 @@ async function syncToBlockchain(recordId: string): Promise<void> {
 
     try {
         let result: { eventId: number; txHash: string };
-        const chainConsentType = mapConsentTypeToChain(record.consentType);
+        const chainConsentType = mapConsentTypeToChain(record.consentType as any);
         const expiresAtUnix = record.expiresAt ? Math.floor(record.expiresAt.getTime() / 1000) : 0;
 
         if (record.action === 'GRANT') {

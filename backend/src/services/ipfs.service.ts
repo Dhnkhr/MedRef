@@ -73,7 +73,7 @@ export async function uploadToIPFS(
             throw new Error(`Pinata API error: ${response.status} ${errorText}`);
         }
 
-        const result = await response.json();
+        const result = await response.json() as any;
         return {
             success: true,
             ipfsHash: result.IpfsHash,
@@ -88,7 +88,7 @@ export async function uploadToIPFS(
 }
 
 /**
- * Retrieve content from IPFS via Pinata gateway
+ * Retrieve content from IPFS via Pinata gateway (with fallback strategies)
  */
 export async function getFromIPFS(ipfsHash: string): Promise<any> {
     if (!PINATA_JWT) {
@@ -96,32 +96,75 @@ export async function getFromIPFS(ipfsHash: string): Promise<any> {
         return { encrypted: 'mock-encrypted-data', version: '1.0', schema: 'medref-document' };
     }
 
+    const errors: string[] = [];
+
+    // Strategy 1: Dedicated gateway with JWT auth header
     try {
         const gatewayUrl = getIPFSGatewayUrl(ipfsHash);
-        const response = await fetch(gatewayUrl);
-        if (!response.ok) {
-            throw new Error(`IPFS fetch failed: ${response.status}`);
+        console.log(`[IPFS] Trying dedicated gateway: ${gatewayUrl}`);
+        const response = await fetch(gatewayUrl, {
+            headers: { Authorization: `Bearer ${PINATA_JWT}` },
+        });
+        if (response.ok) {
+            return await parseIPFSResponse(response);
         }
-
-        const contentType = response.headers.get('content-type') || '';
-        const bodyText = await response.text();
-
-        if (contentType.includes('application/json')) {
-            return JSON.parse(bodyText);
-        }
-
-        try {
-            return JSON.parse(bodyText);
-        } catch {
-            return {
-                raw: bodyText,
-                contentType,
-                gatewayUrl,
-            };
-        }
+        errors.push(`Gateway ${response.status}`);
     } catch (error: any) {
-        console.error('[IPFS] Fetch failed:', error.message);
-        throw error;
+        errors.push(`Gateway: ${error.message}`);
+    }
+
+    // Strategy 2: Dedicated gateway with ?pinataGatewayToken query param
+    try {
+        const gatewayUrl = `${getIPFSGatewayUrl(ipfsHash)}?pinataGatewayToken=${PINATA_JWT}`;
+        console.log(`[IPFS] Trying gateway with token param`);
+        const response = await fetch(gatewayUrl);
+        if (response.ok) {
+            return await parseIPFSResponse(response);
+        }
+        errors.push(`Gateway-token ${response.status}`);
+    } catch (error: any) {
+        errors.push(`Gateway-token: ${error.message}`);
+    }
+
+    // Strategy 3: Public IPFS gateways (no auth needed)
+    const publicGateways = [
+        `https://dweb.link/ipfs/${ipfsHash}`,
+        `https://cf-ipfs.com/ipfs/${ipfsHash}`,
+        `https://ipfs.io/ipfs/${ipfsHash}`,
+    ];
+
+    for (const url of publicGateways) {
+        try {
+            console.log(`[IPFS] Trying public gateway: ${url}`);
+            const response = await fetch(url);
+            if (response.ok) {
+                return await parseIPFSResponse(response);
+            }
+            errors.push(`Public ${new URL(url).hostname} ${response.status}`);
+        } catch (error: any) {
+            errors.push(`Public ${new URL(url).hostname}: ${error.message}`);
+        }
+    }
+
+    console.error('[IPFS] All fetch strategies failed:', errors.join('; '));
+    throw new Error(`IPFS fetch failed (tried ${errors.length} methods): ${errors[0]}`);
+}
+
+async function parseIPFSResponse(response: Response): Promise<any> {
+    const contentType = response.headers.get('content-type') || '';
+    const bodyText = await response.text();
+
+    if (contentType.includes('application/json')) {
+        return JSON.parse(bodyText);
+    }
+
+    try {
+        return JSON.parse(bodyText);
+    } catch {
+        return {
+            raw: bodyText,
+            contentType,
+        };
     }
 }
 
@@ -159,7 +202,7 @@ export async function listPatientPins(patientId: string): Promise<any[]> {
             `${PINATA_API_URL}/data/pinList?metadata[keyvalues][patientId]={"value":"${patientId}","op":"eq"}&status=pinned`,
             { headers: { Authorization: `Bearer ${PINATA_JWT}` } }
         );
-        const data = await response.json();
+        const data = await response.json() as any;
         return data.rows || [];
     } catch (error: any) {
         console.error('[IPFS] List failed:', error.message);

@@ -46,18 +46,20 @@ router.post('/upload', async (req: Request, res: Response) => {
         const docType = documentType;
         const data = documentData;
 
-        // 1. Generate encryption key — use PIN if available, else random fallback
+        // 1. Encrypt — use PIN if available, else random key fallback
         let encKey: Buffer;
+        let encPayload;
         if (DOCUMENT_PIN && DOCUMENT_PIN.length > 0) {
-            // Encrypt with PIN-derived key so it can always be decrypted with PIN
-            const salt = crypto.randomBytes(16);
-            encKey = deriveKey(DOCUMENT_PIN, salt);
+            // Pass PIN directly so encrypt() derives the key using its own salt.
+            // This ensures the salt stored in the payload matches the key used.
+            encPayload = encrypt(data, DOCUMENT_PIN);
+            encKey = deriveKey(DOCUMENT_PIN, Buffer.from(encPayload.salt, 'base64'));
         } else {
             // Fallback: use random key (no PIN configured)
             encKey = generateKey();
+            encPayload = encrypt(data, encKey);
         }
 
-        const encPayload = encrypt(data, encKey);
         const encKeyHash = crypto.createHash('sha256').update(encKey).digest('hex');
 
         // 2. Upload encrypted data to IPFS via Pinata
@@ -200,10 +202,9 @@ router.get('/:patientId/:recordId', async (req: Request, res: Response) => {
         const docRecord = await prisma.document.findFirst({
             where: {
                 ipfsHash: record.ipfsHash,
-                OR: [
-                    { patient: { patientId } },
-                    { patientId }, // Legacy fallback for older rows
-                ],
+                patient: {
+                    patientId: patientId, // Match by patient's patientId (MR-xxxx format)
+                },
             },
         });
         await prisma.$disconnect();
@@ -340,7 +341,7 @@ router.get('/:patientId/:recordId/debug', async (req: Request, res: Response) =>
         const docRecord = await prisma.document.findFirst({
             where: {
                 ipfsHash: record.ipfsHash,
-                OR: [{ patient: { patientId } }, { patientId }],
+                patient: { patientId: patientId },
             },
             select: {
                 id: true,
